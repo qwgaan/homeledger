@@ -357,17 +357,40 @@
     const preview = $('#import-preview');
     const state = { token: null };
 
+    // 「导入到账户」：选「＋ 新建账户…」时露出输入框；切回已有账户时收起清空
+    const accSel = $('#import-account');
+    const accNew = $('#import-account-new');
+    if (accSel && accNew) {
+      accSel.addEventListener('change', () => {
+        const isNew = accSel.value === '__new__';
+        accNew.classList.toggle('hidden', !isNew);
+        if (isNew) accNew.focus(); else accNew.value = '';
+      });
+    }
+    /** 取当前选定的目标账户 → { accountId, newName } */
+    function readAccountChoice() {
+      const v = accSel ? accSel.value : '';
+      if (v === '__new__') return { accountId: null, newName: (accNew && accNew.value.trim()) || '' };
+      return { accountId: v ? Number(v) : null, newName: '' };
+    }
+
     async function handle(file) {
       if (!file) return;
       if (file.size > 20 * 1024 * 1024) return toast('文件请小于 20MB', 'warn');
+      const choice = readAccountChoice();
+      if (choice.newName && choice.newName.length > 30) return toast('账户名请控制在 30 字以内', 'warn');
       preview.innerHTML = '<div class="card"><span class="muted">正在解析账单文件…</span></div>';
       try {
         const dataUrl = await fileToDataUrl(file);
         const hint = ($('#import-source') || {}).value || 'auto';
         const bank = ($('#import-bank') || {}).value || 'generic';
-        const res = await postJson('/api/import/preview', { dataUrl, fileName: file.name, sourceHint: hint, bankHint: bank });
+        const res = await postJson('/api/import/preview', {
+          dataUrl, fileName: file.name, sourceHint: hint, bankHint: bank,
+          targetAccountId: choice.accountId,
+        });
         if (!res.ok) throw new Error(res.error);
         state.token = res.token;
+        state.newAccountName = choice.newName;
         renderPreview(res, file.name);
       } catch (e) {
         preview.innerHTML = '<div class="flash error">解析失败：' + esc(e.message) + '</div>';
@@ -413,6 +436,16 @@
         html += '</tbody></table></div></details>';
       }
       if (res.skipped) html += '<div class="notice mb12">已自动跳过 ' + res.skipped + ' 条（交易关闭 / 已退款 / 失败 / 金额为 0）不参与导入的记录。</div>';
+      // 目标账户：没指定时要提醒 —— 银行账单摘要无账户信息，不指定就会记到别的账户上
+      const targetAcc = (res.accounts || []).find((a) => Number(a.id) === Number(res.targetAccountId));
+      if (targetAcc) {
+        html += '<div class="notice mb12">这 ' + res.count + ' 条将全部导入到账户 <b>' + esc(targetAcc.icon || '') + ' ' + esc(targetAcc.name) + '</b>' +
+          '<span class="muted">（可在上方「导入到账户」改选后重新上传）</span></div>';
+      } else if (res.source === 'bank') {
+        html += '<div class="notice warn mb12">未指定目标账户：银行账单摘要里没有账户信息，' +
+          '程序会按摘要猜测并<b>自动新建账户</b>，钱可能记到错误的账户上。' +
+          '建议在上方「导入到账户」中选好该账单的真实账户后重新上传。</div>';
+      }
       html += '<div class="row mb12"><label class="check"><input type="checkbox" id="imp-auto-acc" checked> 自动创建缺失的支付账户</label>' +
         '<span class="spacer"></span>' +
         '<button class="btn btn-primary" id="imp-commit">确认导入 ' + res.count + ' 条</button></div>';
@@ -467,11 +500,20 @@
 
       $('#imp-commit').addEventListener('click', async () => {
         const btn = $('#imp-commit');
+        const choice = readAccountChoice();
+        // 选了「新建账户」但没填名字 —— 与其静默按摘要兜底，不如当场拦下问清楚
+        if (choice.newName === '' && accSel && accSel.value === '__new__') {
+          toast('请填写新账户的名称', 'warn');
+          if (accNew) accNew.focus();
+          return;
+        }
         btn.disabled = true; btn.textContent = '导入中…';
         const r = await postJson('/api/import/commit', {
           token: state.token,
           auto_create_account: $('#imp-auto-acc').checked,
           include_neutral: !!($('#imp-include-neutral') && $('#imp-include-neutral').checked),
+          target_account_id: choice.accountId,
+          new_account_name: choice.newName,
         });
         if (r.ok) {
           toast('成功导入 ' + r.imported + ' 条，跳过重复 ' + r.skipped + ' 条', 'success');
