@@ -7,7 +7,7 @@
  *   - 留空时，关于页的反馈按钮会置灰并提示「仓库暂未配置」，
  *     页面其余内容不受影响。
  */
-const GITHUB_REPO = 'https://github.com/sucraft-hub/homeledger';
+const GITHUB_REPO = 'https://github.com/qwgaan/homeledger';
 
 const APP = {
   name: '家账簿 HomeLedger',
@@ -36,9 +36,25 @@ const FEATURES = [
  */
 const CHANGELOG = [
   {
+    version: '0.1.1',
+    date: '2026-10-10',
+    tag: '当前版本',
+    items: [
+      '银行账单导入：支持广发 / 招商等格式，可在导入页手工指定银行，不再靠表头猜测',
+      '招商银行支持：3 位日期（812）自动补全年份，多小节结构（还款 / 消费）分别解析',
+      '导入支持 Excel（.xlsx）：零新增依赖，自研解析器，日期序列号与浮点误差已处理',
+      '一个工作表放一个月的年度账单会全部导入（此前只读第一个月，其余月份静默丢弃）',
+      '修复导入去重误伤：同一天同金额同商户的多笔真实交易不再被当成重复而丢账',
+      '修复批量删除 / 批量报销报「cannot start a transaction within a transaction」而完全不可用',
+      '修复周期账单：只提醒模式不再重复记账，「只提醒不记账」开关真正生效',
+      '修复周期账单记账人恒为 user_id=1 的问题（多用户账本成员报表会全错）',
+      '新增 Windows 一键启动脚本 start.bat',
+    ],
+  },
+  {
     version: '1.0.0',
     date: '2026-09-25',
-    tag: '当前版本',
+    tag: '',
     items: [
       '首个公开发布版本：核心记账、预算与储蓄目标、借贷台账、账单导入',
       '订阅扣费管理：周期扣费自动生成流水，月均/年化成本统计与到期提醒',
