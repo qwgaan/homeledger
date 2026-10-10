@@ -344,6 +344,58 @@
     </form>
   </div>
 
+  <div class="card" style="border-color:#e7b4b4">
+    <div class="card-head"><h2>🧹 清除账单数据</h2><span class="chip expense">危险操作</span></div>
+    <p class="small muted mb12">
+      用于清理误导入或试用的数据。<b>清除采用软删除</b>（数据仍留在库中，可从数据库文件捞回），
+      账户、分类、预算、周期账单等设置<b>不受影响</b>。清除后账户余额会自动重算。
+    </p>
+
+    <form method="post" action="/admin/purge-transactions" data-confirm="确认清除所选范围内的账单数据？该操作会让这些交易从所有报表中消失。">
+      <input type="hidden" name="_csrf" value="<%= csrf %>">
+      <input type="hidden" name="mode" value="range">
+      <div class="row wrap" style="gap:10px;align-items:flex-end">
+        <div class="field" style="min-width:150px">
+          <label>开始日期</label>
+          <input type="date" name="from" required>
+        </div>
+        <div class="field" style="min-width:150px">
+          <label>结束日期</label>
+          <input type="date" name="to" required>
+        </div>
+        <button class="btn" type="submit">清除该时间段账目</button>
+      </div>
+      <label class="check mt12">
+        <input type="checkbox" name="purge_accounts" value="on">
+        同时清理<b>导入时自动创建、且已无任何流水</b>的空账户（手动创建的账户不会被删）
+      </label>
+    </form>
+
+    <hr class="mt16 mb16" style="border:none;border-top:1px solid var(--line)">
+
+    <form method="post" action="/admin/purge-transactions" data-confirm="⚠️ 这将清空当前账本的全部账目，且不可撤销。确定继续？">
+      <input type="hidden" name="_csrf" value="<%= csrf %>">
+      <input type="hidden" name="mode" value="all">
+      <p class="small mb8">清空<b>当前账本</b>的全部账目（当前账本：<b><%= ledgerName %></b>）。请输入
+        <b class="mono">清空全部账目</b> 以确认：</p>
+      <div class="row wrap" style="gap:10px;align-items:flex-end">
+        <div class="field" style="min-width:200px">
+          <label>确认词</label>
+          <input type="text" name="confirm_text" placeholder="清空全部账目" autocomplete="off">
+        </div>
+        <button class="btn btn-danger" type="submit">清空全部账目</button>
+      </div>
+      <label class="check mt12">
+        <input type="checkbox" name="purge_accounts" value="on">
+        同时清理<b>导入时自动创建、且已无任何流水</b>的空账户（手动创建的账户不会被删）
+      </label>
+    </form>
+
+    <p class="tiny muted mt12">
+      清除采用软删除，记录仍保留在数据库中；清理账户只针对「由账单导入自动创建」且余额为 0、无任何流水的账户。
+    </p>
+  </div>
+
   <div class="card">
     <div class="card-head"><h2>📜 操作审计日志</h2><span class="muted small">最近 60 条</span></div>
     <% if (!admin.audits.length) { %>
