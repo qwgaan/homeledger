@@ -120,8 +120,14 @@ const stub = http.createServer((req, res) => {
   check('非法字符未进入请求头', lastAuth === null, String(lastAuth));
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
-  stub.close();
-  process.exit(fail ? 1 : 0);
+  // ★ Node 24 + Windows：多次 fetch 会建立 undici keep-alive 连接池，
+  // server.close() 回调触发后立刻 process.exit() 会在 libuv 关闭途中被强杀，
+  // 抛 "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"（src\win\async.c:94）。
+  // 实测：close 回调里等 300ms 再退出即可规避（Node 22 无此问题，但同样写法无害）。
+  // 详见 verify-model-list.js 同处注释。
+  stub.close(() => setTimeout(() => process.exit(fail ? 1 : 0), 300));
+  // 兜底：万一有 keep-alive 连接卡住，3 秒后强制退出（结果已打印，不影响判定）
+  setTimeout(() => process.exit(fail ? 1 : 0), 3000).unref();
 })().catch((e) => {
   console.error('脚本异常：', e);
   process.exit(1);
