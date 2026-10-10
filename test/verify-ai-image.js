@@ -96,7 +96,12 @@ const imgUrls = () => {
   const t = await ai.testConnection();
   check('testConnection 正常返回', t.ok === true, JSON.stringify(t).slice(0, 80));
 
-  stub.close();
+  // ★ Node 24 + Windows：多次 fetch 会建立 undici keep-alive 连接池，
+  // server.close() 回调触发后立刻 process.exit() 会在 libuv 关闭途中被强杀，
+  // 抛 "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"（src\win\async.c:94）。
+  // 实测：close 回调里等 300ms 再退出即可规避（Node 22 无此问题，但同样写法无害）。
+  // 详见 verify-model-list.js 同处注释。
+  stub.close(() => setTimeout(() => process.exit(fail ? 1 : 0), 300));
+  setTimeout(() => process.exit(fail ? 1 : 0), 3000).unref();
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
-  process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error('脚本异常:', e); process.exit(1); });
