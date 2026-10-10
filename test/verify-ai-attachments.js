@@ -209,8 +209,13 @@ function uploadFiles(dir = path.join(DATA_DIR, 'uploads')) {
   check('附件库能看到已关联截图', res.status === 200 && res.text.includes(String(scanImg.url || '')), `HTTP ${res.status}`);
 
   console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
-  stub.close();
-  process.exit(fail ? 1 : 0);
+  // ★ Node 24 + Windows：多次 fetch 会建立 undici keep-alive 连接池，
+  // server.close() 回调触发后立刻 process.exit() 会在 libuv 关闭途中被强杀，
+  // 抛 "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"（src\win\async.c:94）。
+  // 实测：close 回调里等 300ms 再退出即可规避（Node 22 无此问题，但同样写法无害）。
+  // 详见 verify-model-list.js 同处注释。
+  stub.close(() => setTimeout(() => process.exit(fail ? 1 : 0), 300));
+  setTimeout(() => process.exit(fail ? 1 : 0), 3000).unref();
 })().catch((e) => {
   console.error('脚本异常：', e);
   process.exit(1);
