@@ -363,7 +363,9 @@
       preview.innerHTML = '<div class="card"><span class="muted">正在解析账单文件…</span></div>';
       try {
         const dataUrl = await fileToDataUrl(file);
-        const res = await postJson('/api/import/preview', { dataUrl, fileName: file.name });
+        const hint = ($('#import-source') || {}).value || 'auto';
+        const bank = ($('#import-bank') || {}).value || 'generic';
+        const res = await postJson('/api/import/preview', { dataUrl, fileName: file.name, sourceHint: hint, bankHint: bank });
         if (!res.ok) throw new Error(res.error);
         state.token = res.token;
         renderPreview(res, file.name);
@@ -375,14 +377,42 @@
     function renderPreview(res, fileName) {
       let html = '<div class="card">';
       html += '<div class="card-head"><h2>解析结果</h2><span class="chip primary">' + esc(res.sourceLabel) + '</span>' +
+        (res.bankHint && res.bankHint !== 'generic' ? '<span class="chip">' + esc(res.bankLabel) + '</span>' : '') +
         '<span class="chip">编码 ' + esc(res.encoding) + '</span><span class="chip">共 ' + res.count + ' 条</span></div>';
+      // 手工指定来源与自动识别不一致时如实提示，避免「以为按银行解析、其实是按支付宝」
+      if (res.sourceForced && res.detected && res.detected !== res.source) {
+        html += '<div class="notice warn mb12">你手工指定为「<b>' + esc(res.sourceLabel) + '」，' +
+          '但表头看起来像「' + esc(res.detectedLabel) + '」。已按你指定的来源解析，' +
+          '若结果不对请切换来源后重新上传。</div>';
+      }
+      // 招行这类日期缺年份的账单：年份是推断出来的，必须让用户看见
+      if (res.year) {
+        html += '<div class="notice ' + (res.yearInferred ? 'warn' : '') + ' mb12">' +
+          '日期中的<b>年份 ' + res.year + '</b>来自' + esc(res.yearFrom || '推断') + '。' +
+          (res.yearInferred ? '<b>请核对下方日期是否正确。</b>' : '') + '</div>';
+      }
       html += '<div class="grid grid-4 mb16">' +
         '<div class="stat"><div class="label">支出合计</div><div class="value amount expense">' + money(res.stat.expense) + '</div></div>' +
         '<div class="stat"><div class="label">收入合计</div><div class="value amount income">' + money(res.stat.income) + '</div></div>' +
         '<div class="stat"><div class="label">转账合计</div><div class="value amount neutral">' + money(res.stat.transfer) + '</div></div>' +
         '<div class="stat"><div class="label">时间范围</div><div class="value tiny" style="font-size:13px">' + esc(res.stat.minDate || '—') + '<br>' + esc(res.stat.maxDate || '—') + '</div></div>' +
       '</div>';
-      if (res.skipped) html += '<div class="notice mb12">已自动跳过 ' + res.skipped + ' 条（交易关闭 / 已退款 / 失败）不参与导入的记录。</div>';
+      // 多 sheet：银行年度账单常一个 sheet 一个月，把每个月分别列出来，便于核对是否漏月
+      if (res.sheetCount > 1) {
+        const months = res.sheets.filter((s) => s.records || s.neutral).map((s) => s.month || s.name);
+        html += '<div class="notice mb12">检测到文件含 <b>' + res.sheetCount + ' 个工作表</b>，已全部导入' +
+          (months.length ? '（' + esc(months.join('、')) + '）' : '') + '。下方明细可逐条核对。</div>';
+        html += '<details class="mb12"><summary class="small muted" style="cursor:pointer">按工作表查看各月笔数</summary>' +
+          '<div class="scroll-x mt8"><table class="table responsive"><thead><tr><th>工作表</th><th>月份</th><th class="num">收支</th><th class="num">转账</th><th class="num">跳过</th></tr></thead><tbody>';
+        res.sheets.forEach((s) => {
+          html += '<tr><td>' + esc(s.name || '（未命名）') + '</td><td class="nowrap">' + esc(s.month || '—') + '</td>' +
+            '<td class="num">' + (s.records || 0) + '</td>' +
+            '<td class="num muted">' + (s.neutral || 0) + '</td>' +
+            '<td class="num muted">' + (s.skipped || 0) + '</td></tr>';
+        });
+        html += '</tbody></table></div></details>';
+      }
+      if (res.skipped) html += '<div class="notice mb12">已自动跳过 ' + res.skipped + ' 条（交易关闭 / 已退款 / 失败 / 金额为 0）不参与导入的记录。</div>';
       html += '<div class="row mb12"><label class="check"><input type="checkbox" id="imp-auto-acc" checked> 自动创建缺失的支付账户</label>' +
         '<span class="spacer"></span>' +
         '<button class="btn btn-primary" id="imp-commit">确认导入 ' + res.count + ' 条</button></div>';
@@ -410,9 +440,12 @@
 
       html += '<div class="card">';
       html += '<div class="card-head"><h2>将导入的明细</h2></div>';
-      html += '<div class="scroll-x"><table class="table responsive"><thead><tr><th>日期</th><th>类型</th><th class="num">金额</th><th>商家/说明</th><th>建议分类</th><th>账户</th></tr></thead><tbody>';
+      html += '<div class="scroll-x"><table class="table responsive"><thead><tr><th>日期</th>' +
+        (res.sheetCount > 1 ? '<th>来源表</th>' : '') +
+        '<th>类型</th><th class="num">金额</th><th>商家/说明</th><th>建议分类</th><th>账户</th></tr></thead><tbody>';
       res.sample.slice(0, 60).forEach((r) => {
         html += '<tr><td class="nowrap">' + esc(r.txn_date) + '</td>' +
+          (res.sheetCount > 1 ? '<td class="tiny muted nowrap">' + esc(r.sheet_month || r.source_sheet || '—') + '</td>' : '') +
           '<td><span class="chip ' + (r.type === 'income' ? 'income' : r.type === 'transfer' ? '' : 'expense') + '">' + esc(r.type_label) + '</span></td>' +
           '<td class="num amount ' + (r.type === 'income' ? 'income' : 'expense') + '">' + money(r.amount_cents) + '</td>' +
           '<td>' + esc(r.merchant || r.note || '—') + '</td>' +
