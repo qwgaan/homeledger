@@ -44,38 +44,47 @@ function runDueRecurring(today = todayStr()) {
   for (const rule of rules) {
     let payload;
     try { payload = JSON.parse(rule.payload); } catch { continue; }
-    const items = Array.isArray(payload) ? payload : [payload];
-    tx(() => {
-      for (const p of items) {
-        const amount = Math.abs(Number(p.amount_cents) || 0);
-        if (!amount) continue;
-        run(
-          `INSERT INTO transactions
-           (ledger_id, type, amount_cents, currency, rate, amount_base_cents, account_id, to_account_id, category_id,
-            user_id, txn_date, note, merchant, status, source, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          rule.ledger_id, p.type || 'expense', amount, p.currency || 'CNY', 1, amount,
-          p.account_id || null, p.to_account_id || null, p.category_id || null,
-          payload.user_id || rule.created_by_user_id || 1, rule.next_run_at,
-          p.note || rule.name, p.merchant || null, 'cleared', 'recurring', nowStr(), nowStr()
-        );
-        created++;
-      }
-      if (rule.auto_post) {
-        run('UPDATE recurring_rules SET last_run_at = ?, next_run_at = ? WHERE id = ?', rule.next_run_at, advanceDate(rule.next_run_at, rule), rule.id);
-      }
-    });
-    if (rule.auto_post) continue;
-    // 非自动模式：只提醒
-    for (const uid of ledgerWriterIds(rule.ledger_id)) {
-      notify(uid, {
-        kind: 'recurring', ledgerId: rule.ledger_id,
-        title: `周期账单待确认：${rule.name}`,
-        body: `计划日期 ${rule.next_run_at}`,
-        link: '/recurring',
+    // payload 有三种形状：{items:[...]}（planning.js 写入的）、裸数组、单条对象
+    const items = Array.isArray(payload) ? payload
+      : Array.isArray(payload?.items) ? payload.items
+      : [payload];
+    // 记账人：优先 payload 里记的用户，其次规则创建者
+    const userId = payload?.user_id || rule.created_by_user_id || 1;
+    if (rule.auto_post) {
+      tx(() => {
+        for (const p of items) {
+          const amount = Math.abs(Number(p.amount_cents) || 0);
+          if (!amount) continue;
+          run(
+            `INSERT INTO transactions
+             (ledger_id, type, amount_cents, currency, rate, amount_base_cents, account_id, to_account_id, category_id,
+              user_id, txn_date, note, merchant, status, source, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            rule.ledger_id, p.type || 'expense', amount, p.currency || 'CNY', 1, amount,
+            p.account_id || null, p.to_account_id || null, p.category_id || null,
+            userId, rule.next_run_at,
+            p.note || rule.name, p.merchant || null, 'cleared', 'recurring', nowStr(), nowStr()
+          );
+          created++;
+        }
       });
     }
-    run('UPDATE recurring_rules SET last_run_at = ? WHERE id = ?', nowStr(), rule.id);
+    // 无论是否自动记账，都必须推进 next_run_at，否则同一期会被 30 分钟兜底轮询反复触发
+    run(
+      'UPDATE recurring_rules SET last_run_at = ?, next_run_at = ? WHERE id = ?',
+      nowStr(), advanceDate(rule.next_run_at, rule), rule.id
+    );
+    // 非自动模式：只提醒，不写账
+    if (!rule.auto_post) {
+      for (const uid of ledgerWriterIds(rule.ledger_id)) {
+        notify(uid, {
+          kind: 'recurring', ledgerId: rule.ledger_id,
+          title: `周期账单待确认：${rule.name}`,
+          body: `计划日期 ${rule.next_run_at}`,
+          link: '/recurring',
+        });
+      }
+    }
   }
   return created;
 }
