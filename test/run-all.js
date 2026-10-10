@@ -11,6 +11,10 @@ const http = require('node:http');
 const ROOT = path.join(__dirname, '..');
 const PORT = 8099;
 const SUITES = [
+  'verify-txn-scheduler.js',
+  'verify-bank-import.js',
+  'verify-bank-profiles.js',
+  'verify-import-source.js',
   'verify-about.js',
   'verify-settings-admin.js',
   'verify-ai-chat.js',
