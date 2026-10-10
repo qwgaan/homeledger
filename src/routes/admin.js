@@ -433,18 +433,25 @@ router.get('/import', auth.requireLogin, auth.requireLedgerWrite, (req, res) => 
 router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (req, res) => {
   const ledgerId = Number(res.locals.ledger.id);
   try {
-    const { dataUrl, fileName } = req.body;
+    const { dataUrl, fileName, sourceHint, bankHint } = req.body;
     const m = /^data:.*?;base64,(.+)$/s.exec(String(dataUrl || ''));
-    if (!m) return res.status(400).json({ ok: false, error: '请选择 CSV 账单文件' });
+    if (!m) return res.status(400).json({ ok: false, error: '请选择账单文件（支持 .csv / .xlsx）' });
     const buf = Buffer.from(m[1], 'base64');
     if (buf.length > 20 * 1024 * 1024) return res.status(400).json({ ok: false, error: '文件请小于 20MB' });
-    const parsed = importer.parseBill(buf);
+    // sourceHint：用户手工指定的来源（auto = 自动识别）
+    // bankHint：用户指定的银行 profile（generic/cgb/cmb）—— 选定后该银行的列映射与
+    // 日期规则直接生效，不再依赖表头猜测。这是各家网银导出格式差异很大时最可靠的方式。
+    const hint = ['auto', 'alipay', 'wechat', 'bank', 'generic'].includes(String(sourceHint || '')) ? String(sourceHint) : 'auto';
+    const profiles = require('../lib/bank-profiles');
+    const bank = profiles.getProfile(bankHint).key;
+    const parsed = importer.parseBillFile(buf, fileName, { source: bank === 'cmb' ? 'bank' : hint, bank });
     if (parsed.error) return res.status(400).json({ ok: false, error: parsed.error });
 
     const token = u.uid(24);
     previewCache.set(token, {
       records: parsed.records, neutralRecords: parsed.neutralRecords || [],
-      source: parsed.source, fileName: fileName || 'bill.csv', encoding: parsed.encoding,
+      source: parsed.source, fileName: fileName || 'bill.csv', encoding: parsed.encoding || 'utf-8',
+      sheetCount: parsed.sheetCount || 1, sheets: parsed.sheets || null,
       createdAt: Date.now(), ledgerId, userId: req.session.userId,
     });
 
@@ -462,7 +469,27 @@ router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (
       }
       return kind === 'income' ? '其他收入/其他收入' : '其他支出/其他';
     };
-    const sample = parsed.records.slice(0, 200).map((r) => ({
+    // 预览采样：单 sheet 取前 200 条；多 sheet 时按 sheet 轮流取，
+    // 保证每个月都有记录出现在预览里（否则「一个 sheet 一个月」的文件只会看到第一个月）
+    const CAP = 200;
+    let sampleSrc = parsed.records;
+    if (parsed.records.length > CAP) {
+      if ((parsed.sheetCount || 1) > 1) {
+        const buckets = new Map();
+        for (const r of parsed.records) {
+          const k = r.sheet_month || r.source_sheet || '_';
+          if (!buckets.has(k)) buckets.set(k, []);
+          buckets.get(k).push(r);
+        }
+        const per = Math.max(1, Math.ceil(CAP / buckets.size));
+        const picked = [];
+        for (const [, list] of buckets) picked.push(...list.slice(0, per));
+        sampleSrc = picked.slice(0, CAP);
+      } else {
+        sampleSrc = parsed.records.slice(0, CAP);
+      }
+    }
+    const sample = sampleSrc.map((r) => ({
       ...r,
       type_label: require('../db').TXN_TYPE_MAP[r.type]?.label || r.type,
       guess_category: guessCat(r),
@@ -485,15 +512,30 @@ router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (
       guess_account: r.account_hint || '—',
     }));
 
+    const SOURCE_LABEL = { alipay: '支付宝账单', wechat: '微信支付账单', bank: '银行账单', generic: '通用 CSV' };
     res.json({
       ok: true, token,
       source: parsed.source,
-      sourceLabel: { alipay: '支付宝账单', wechat: '微信支付账单', generic: '通用 CSV' }[parsed.source] || parsed.source,
+      sourceLabel: SOURCE_LABEL[parsed.source] || parsed.source,
+      // 自动识别结果与用户指定不一致时如实告知（如手工指定「银行账单」但表头像支付宝）
+      detected: parsed.detected || parsed.source,
+      detectedLabel: SOURCE_LABEL[parsed.detected || parsed.source] || parsed.detected || parsed.source,
+      sourceForced: !!parsed.forced,
+      sourceHint: hint,
+      bankHint: bank,
+      bankLabel: profiles.getProfile(bank).label,
       encoding: parsed.encoding,
       header: parsed.header,
       count: parsed.records.length,
       skipped: parsed.skipped || 0,
       neutralCount: (parsed.neutralRecords || []).length,
+      // 多 sheet 明细（银行年度账单常一个 sheet 一个月）
+      sheetCount: parsed.sheetCount || null,
+      sheets: parsed.sheets || null,
+      // 招行等日期缺年份的账单：年份来源要如实告知用户
+      year: parsed.year || null,
+      yearInferred: !!parsed.yearInferred,
+      yearFrom: parsed.yearFrom || null,
       neutralSample,
       sample, stat,
     });
