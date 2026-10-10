@@ -22,7 +22,7 @@
 ```yaml
 services:
   homeledger:
-    image: ghcr.io/sucraft-hub/homeledger:latest
+    image: ghcr.io/qwgaan/homeledger:latest
     container_name: homeledger
     restart: unless-stopped
     environment:
@@ -58,13 +58,13 @@ docker compose up -d
 ```bash
 docker run -d --name homeledger --restart unless-stopped -p 5111:5111 \
   -e TZ=Asia/Shanghai -e SESSION_SECRET="请改成随机长字符串" \
-  -v "$PWD/data:/data" ghcr.io/sucraft-hub/homeledger:latest
+  -v "$PWD/data:/data" ghcr.io/qwgaan/homeledger:latest
 ```
 
 ### 方式 C：从源码构建（不想用预构建镜像）
 
 ```bash
-git clone https://github.com/sucraft-hub/homeledger.git && cd homeledger
+git clone https://github.com/qwgaan/homeledger.git && cd homeledger
 docker compose up -d          # 仓库自带 docker-compose.yml（build: . 本地构建）
 ```
 
