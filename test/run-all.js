@@ -15,6 +15,8 @@ const SUITES = [
   'verify-bank-import.js',
   'verify-bank-profiles.js',
   'verify-import-source.js',
+  'verify-import-account.js',
+  'verify-purge-data.js',
   'verify-about.js',
   'verify-settings-admin.js',
   'verify-ai-chat.js',
