@@ -11,3 +11,10 @@ dist/
 *-out.txt
 ui-*.png
 _cc.txt
+
+# 真实银行账单含卡号、手机号等敏感信息，绝不入库。
+# 测试改用 test/fixtures/make-bank-samples.js 现场造等价格式样本。
+docs/*.csv
+docs/*.xlsx
+~$*.xlsx
+screenshots/
