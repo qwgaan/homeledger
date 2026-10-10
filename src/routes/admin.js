@@ -5,7 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const express = require('express');
 const {
-  all, get, run, tx, nowStr, todayStr, DATA_DIR, DB_FILE,
+  all, get, run, tx, nowStr, todayStr, DATA_DIR, DB_FILE, recalcBalances,
   getSetting, setSetting, createDefaultAccounts, addLedgerMember,
 } = require('../db');
 const auth = require('../lib/auth');
@@ -61,6 +61,7 @@ router.get('/settings', auth.requireLogin, (req, res) => {
     isAdmin,
     newToken,
     admin: adminData,
+    ledgerName: res.locals.ledger ? res.locals.ledger.name : '（未选择账本）',
     apiTokens: all(
       `SELECT id, name, token_tail, last_used_at, created_at FROM api_tokens
        WHERE user_id = ? AND revoked_at IS NULL ORDER BY id DESC`,
@@ -433,7 +434,7 @@ router.get('/import', auth.requireLogin, auth.requireLedgerWrite, (req, res) => 
 router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (req, res) => {
   const ledgerId = Number(res.locals.ledger.id);
   try {
-    const { dataUrl, fileName, sourceHint, bankHint } = req.body;
+    const { dataUrl, fileName, sourceHint, bankHint, targetAccountId } = req.body;
     const m = /^data:.*?;base64,(.+)$/s.exec(String(dataUrl || ''));
     if (!m) return res.status(400).json({ ok: false, error: '请选择账单文件（支持 .csv / .xlsx）' });
     const buf = Buffer.from(m[1], 'base64');
@@ -452,6 +453,9 @@ router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (
       records: parsed.records, neutralRecords: parsed.neutralRecords || [],
       source: parsed.source, fileName: fileName || 'bill.csv', encoding: parsed.encoding || 'utf-8',
       sheetCount: parsed.sheetCount || 1, sheets: parsed.sheets || null,
+      // 目标账户在预览时就记下来，commit 时以它为准（预览与入库不能选到两个账户）
+      targetAccountId: targetAccountId ? Number(targetAccountId) : null,
+      bankHint: bank,
       createdAt: Date.now(), ledgerId, userId: req.session.userId,
     });
 
@@ -513,6 +517,8 @@ router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (
     }));
 
     const SOURCE_LABEL = { alipay: '支付宝账单', wechat: '微信支付账单', bank: '银行账单', generic: '通用 CSV' };
+    // 目标账户：把账本里的账户一并回传，预览页可随时改选（含「新建账户」）
+    const accounts = fd.accounts(ledgerId).map((a) => ({ id: a.id, name: a.name, type: a.type, icon: a.icon }));
     res.json({
       ok: true, token,
       source: parsed.source,
@@ -524,6 +530,9 @@ router.post('/api/import/preview', auth.requireLogin, auth.requireLedgerWrite, (
       sourceHint: hint,
       bankHint: bank,
       bankLabel: profiles.getProfile(bank).label,
+      // 目标账户（用户手工指定的那个；null = 未指定，按摘要兜底）
+      accounts,
+      targetAccountId: targetAccountId ? Number(targetAccountId) : null,
       encoding: parsed.encoding,
       header: parsed.header,
       count: parsed.records.length,
@@ -551,6 +560,17 @@ router.post('/api/import/commit', auth.requireLogin, auth.requireLedgerWrite, (r
     return res.status(400).json({ ok: false, error: '预览已过期，请重新上传文件' });
   }
   try {
+    // 目标账户三选一：
+    //   ① new_account_name 非空 → 先建账户再导入（导入页「+ 新建账户」）
+    //   ② target_account_id 有值 → 全部记录落到该账户（覆盖按摘要猜的账户）
+    //   ③ 都没给 → 维持原行为（按摘要猜，猜不出就自动新建）
+    // 银行流水摘要里没有账户信息，①/② 是「钱别记到储蓄卡上」的唯一办法。
+    let targetAccountId = req.body.target_account_id ? Number(req.body.target_account_id) : (cached.targetAccountId || null);
+    const newName = String(req.body.new_account_name || '').trim();
+    if (newName) {
+      const created = importer.createAccountByName(ledgerId, newName);
+      targetAccountId = created.id;
+    }
     const r = importer.importRecords({
       ledgerId, userId: req.session.userId,
       records: cached.records,
@@ -559,10 +579,11 @@ router.post('/api/import/commit', auth.requireLogin, auth.requireLedgerWrite, (r
       source: cached.source, fileName: cached.fileName,
       autoCreateAccount: req.body.auto_create_account !== false,
       defaultAccountId: req.body.default_account_id ? Number(req.body.default_account_id) : null,
+      targetAccountId,
     });
     previewCache.delete(String(req.body.token));
     auth.audit(req, 'import.commit', { ledgerId, detail: `${cached.fileName} 导入 ${r.imported} 笔` });
-    res.json({ ok: true, ...r, redirect: '/import' });
+    res.json({ ok: true, ...r, targetAccountId, redirect: '/import' });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
   }
@@ -697,6 +718,97 @@ function dirSize(dir) {
   } catch { /* ignore */ }
   return total;
 }
+
+/* ------------------------------ 清除账单数据 ------------------------------ */
+
+/**
+ * 清除账单数据（管理员）。支持两种模式：
+ *   range —— 清除 [from, to] 区间内的交易（含起止两端）
+ *   all   —— 清空当前账本全部交易
+ *
+ * 都是**软删除**（写 deleted_at），不是物理删除 —— 误操作还能从库里捞回来，
+ * 也符合系统「交易一律软删除」的既有约定。可选一并清理**导入时自动创建且已无流水**
+ * 的账户，用于收拾导入产生的垃圾账户；有流水的账户一律不动，避免账实不符。
+ */
+router.post('/admin/purge-transactions', auth.requireLogin, auth.requireAdmin, (req, res) => {
+  const ledger = res.locals.ledger;
+  if (!ledger) { res.flash('error', '请先选择账本'); return res.redirect('/settings#admin'); }
+  const ledgerId = Number(ledger.id);
+  const mode = String(req.body.mode || 'range');
+  const confirmText = String(req.body.confirm_text || '').trim();
+  const purgeAccounts = req.body.purge_accounts === 'on' || req.body.purge_accounts === 'true';
+  const from = String(req.body.from || '').trim();
+  const to = String(req.body.to || '').trim();
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+  if (!['range', 'all'].includes(mode)) {
+    res.flash('error', '未知的清除模式');
+    return res.redirect('/settings#admin');
+  }
+  // 全量清除是不可逆的高危操作，要求手打确认词，避免误点
+  if (mode === 'all' && confirmText !== '清空全部账目') {
+    res.flash('error', '请输入「清空全部账目」以确认全量清除');
+    return res.redirect('/settings#admin');
+  }
+  if (mode === 'range') {
+    if (!DATE_RE.test(from) || !DATE_RE.test(to)) {
+      res.flash('error', '请填写完整的起止日期（YYYY-MM-DD）');
+      return res.redirect('/settings#admin');
+    }
+    if (from > to) {
+      res.flash('error', '开始日期不能晚于结束日期');
+      return res.redirect('/settings#admin');
+    }
+  }
+
+  const where = mode === 'all'
+    ? 'ledger_id = ? AND deleted_at IS NULL'
+    : 'ledger_id = ? AND deleted_at IS NULL AND txn_date >= ? AND txn_date <= ?';
+  const args = mode === 'all' ? [ledgerId] : [ledgerId, from, to];
+
+  let removed = 0, accountsRemoved = [];
+  tx(() => {
+    removed = Number(get(`SELECT COUNT(*) AS c FROM transactions WHERE ${where}`, ...args)?.c || 0);
+    // 先清关联表，再软删交易本身。splits / 标签关联是硬删 —— 它们只服务于对应交易，
+    // 留着会变成指向已删交易的孤儿行，报表聚合时容易踩到。
+    const ids = all(`SELECT id FROM transactions WHERE ${where}`, ...args).map((r) => r.id);
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      run(`DELETE FROM splits WHERE transaction_id IN (${ph})`, ...ids);
+      run(`DELETE FROM transaction_tags WHERE transaction_id IN (${ph})`, ...ids);
+      run(`UPDATE transactions SET deleted_at = ?, updated_at = ? WHERE id IN (${ph})`, nowStr(), nowStr(), ...ids);
+    }
+
+    if (purgeAccounts) {
+      // 只清理「导入自动创建」+「已无任何有效流水」+「余额为 0」的账户。
+      // 三个条件缺一不可：手动建的账户用户可能还要用，有流水的账户删了会让账目悬空。
+      const rows = all(
+        `SELECT a.id, a.name FROM accounts a
+         WHERE a.ledger_id = ?
+           AND a.note IN ('由账单导入自动创建', '导入账单时创建')
+           AND a.balance_cents = 0
+           AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.account_id = a.id AND t.deleted_at IS NULL)
+           AND NOT EXISTS (SELECT 1 FROM transactions t WHERE t.to_account_id = a.id AND t.deleted_at IS NULL)`,
+        ledgerId
+      );
+      for (const a of rows) {
+        run('DELETE FROM accounts WHERE id = ?', a.id);
+        accountsRemoved.push(a.name);
+      }
+    }
+  });
+
+  recalcBalances(ledgerId);
+  const scope = mode === 'all' ? '全部账目' : `${from} ~ ${to}`;
+  auth.audit(req, 'admin.purge_transactions', {
+    ledgerId,
+    detail: `清除${scope} ${removed} 笔` + (accountsRemoved.length ? `，清理空账户 ${accountsRemoved.length} 个` : ''),
+  });
+  res.flash('success',
+    `已清除 ${scope}，共 ${removed} 笔交易` +
+    (accountsRemoved.length ? `，并清理了 ${accountsRemoved.length} 个空账户` : ''));
+  res.redirect('/settings#admin');
+});
 
 router.post('/admin/users/:id', auth.requireLogin, auth.requireAdmin, (req, res) => {
   const id = Number(req.params.id);
