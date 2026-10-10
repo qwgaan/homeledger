@@ -6,9 +6,37 @@
 
   <div class="dropzone" id="import-dropzone">
     <span class="big">📥</span>
-    <div class="bold">把账单 CSV 文件拖到这里，或点击选择</div>
-    <div class="muted small mt8">支持支付宝账单、微信支付账单、以及通用 CSV（含日期/金额/备注列即可）</div>
-    <input type="file" id="import-file" accept=".csv,.txt,text/csv" class="hidden">
+    <div class="bold">把账单文件拖到这里，或点击选择</div>
+    <div class="muted small mt8">支持 <b>.csv</b> 与 <b>.xlsx</b>（Excel/WPS 均可）：支付宝账单、微信支付账单、银行流水（含「交易摘要」列的，如广发/招行等）、以及通用 CSV（含日期/金额/备注列即可）</div>
+    <input type="file" id="import-file" accept=".csv,.txt,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" class="hidden">
+  </div>
+
+  <div class="card mt16">
+    <div class="row">
+      <label for="import-bank" class="nowrap"><b>银行</b></label>
+      <select id="import-bank" class="input" style="max-width:200px">
+        <option value="generic">不指定（自动判断）</option>
+        <option value="cgb">广发银行</option>
+        <option value="cmb">招商银行</option>
+      </select>
+      <span class="spacer"></span>
+      <span class="small muted">
+        各家网银导出的列名与日期格式差异很大，指定银行后按该行格式解析，<b>不会认错</b>。<br>
+        招商银行的日期只有「812」这样的月日，年份取自工作表名（如 202609）。
+      </span>
+    </div>
+    <div class="row mt8">
+      <label for="import-source" class="nowrap"><b>账单来源</b></label>
+      <select id="import-source" class="input" style="max-width:200px">
+        <option value="auto">自动识别（推荐）</option>
+        <option value="bank">银行账单</option>
+        <option value="alipay">支付宝账单</option>
+        <option value="wechat">微信支付账单</option>
+        <option value="generic">通用 CSV</option>
+      </select>
+      <span class="spacer"></span>
+      <span class="small muted">已在上方指定银行时，这里保持「自动识别」即可。</span>
+    </div>
   </div>
 
   <div class="grid grid-3 mt16">
@@ -19,8 +47,15 @@
       <b>微信支付</b><br>我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账 → 下载
     </div>
     <div class="notice">
-      <b>重复导入？</b><br>系统以「日期 + 金额 + 商家」判重，重复导入不会产生重复记录。
+      <b>银行流水</b><br>网银 → 查询明细 / 收支明细，导出 CSV 或用 Excel 另存为 .xlsx。<br>
+      银行账单没有「收/支」列，程序按<b>金额正负 + 摘要括号前缀</b>判定方向：<br>
+      <span class="muted">(消费)→支出　(退款)→收入　(还款)→转账（不计收支）</span><br>
+      <span class="muted">支持一个工作表放一个月的年度账单（202601…202609），会全部导入。</span>
     </div>
+  </div>
+  <div class="notice mt8">
+    <b>重复导入？</b>系统以「日期 + 金额 + 商家」判重，重复导入不会产生重复记录。
+    <span class="muted">老格式 .xls 请在 Excel/WPS 中「另存为 .xlsx」后再导入。</span>
   </div>
 </div>
 
@@ -37,7 +72,7 @@
         <% jobs.forEach(function(j){ %>
           <tr>
             <td class="nowrap muted small"><%= helpers.fmtDateTime(j.created_at) %></td>
-            <td><span class="chip"><%= { alipay:'支付宝', wechat:'微信支付', generic:'通用 CSV' }[j.source] || j.source %></span></td>
+            <td><span class="chip"><%= { alipay:'支付宝', wechat:'微信支付', bank:'银行流水', generic:'通用 CSV' }[j.source] || j.source %></span></td>
             <td class="small"><%= j.file_name || '—' %></td>
             <td class="num amount income"><%= j.imported %></td>
             <td class="num muted"><%= j.skipped %></td>
