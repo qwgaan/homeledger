@@ -46,8 +46,21 @@ const run = (sql, ...p) => {
   const r = prep(sql).run(...p);
   return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
 };
+/**
+ * 事务包装，支持重入（嵌套调用时复用外层事务，不再开 BEGIN）。
+ * 必要性：recalcBalances() 内部自带 tx()，而调用方（bulkDelete / markReimbursed /
+ * 订阅扣费等）往往已经在一个事务里，SQLite 不允许嵌套事务会直接抛
+ * "cannot start a transaction within a transaction"。
+ */
+let txDepth = 0;
 function tx(fn) {
+  if (txDepth > 0) {
+    // 已在事务中：直接执行，出错交给外层回滚
+    txDepth++;
+    try { return fn(); } finally { txDepth--; }
+  }
   db.exec('BEGIN');
+  txDepth = 1;
   try {
     const r = fn();
     db.exec('COMMIT');
@@ -55,6 +68,8 @@ function tx(fn) {
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch { /* ignore */ }
     throw e;
+  } finally {
+    txDepth = 0;
   }
 }
 
@@ -415,6 +430,8 @@ const migrated = [];
 if (ensureColumn('transactions', 'subscription_id', 'INTEGER')) migrated.push('transactions.subscription_id');
 if (ensureColumn('users', 'avatar_path', 'TEXT')) migrated.push('users.avatar_path');
 if (ensureColumn('users', 'avatar_ver', 'INTEGER')) migrated.push('users.avatar_ver');
+// 周期账单自动记账的 user_id 原先硬回退到 1，多用户账本里成员报表会全错
+if (ensureColumn('recurring_rules', 'created_by_user_id', 'INTEGER')) migrated.push('recurring_rules.created_by_user_id');
 if (migrated.length) console.log(`[db] 已补齐字段：${migrated.join('、')}`);
 // 订阅扣费生成的流水按订阅维度回查（必须在 ensureColumn 之后建索引）
 db.exec('CREATE INDEX IF NOT EXISTS idx_txn_subscription ON transactions(subscription_id);');
