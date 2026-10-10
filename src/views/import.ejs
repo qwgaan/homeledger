@@ -37,6 +37,22 @@
       <span class="spacer"></span>
       <span class="small muted">已在上方指定银行时，这里保持「自动识别」即可。</span>
     </div>
+    <div class="row mt8">
+      <label for="import-account" class="nowrap"><b>导入到账户</b></label>
+      <select id="import-account" class="input" style="max-width:200px">
+        <option value="">按摘要自动判断</option>
+        <% accounts.forEach(function(a){ %>
+          <option value="<%= a.id %>"><%= a.icon || '' %> <%= a.name %></option>
+        <% }); %>
+        <option value="__new__">＋ 新建账户…</option>
+      </select>
+      <input type="text" id="import-account-new" class="input hidden" style="max-width:200px" placeholder="账户名，如：广发信用卡" maxlength="30">
+      <span class="spacer"></span>
+      <span class="small muted">
+        银行账单的摘要里<b>没有账户信息</b>，不指定就只能自动新建账户 —— 流水会记到错误的账户上。<br>
+        <b>强烈建议指定</b>该账单对应的真实账户。
+      </span>
+    </div>
   </div>
 
   <div class="grid grid-3 mt16">
