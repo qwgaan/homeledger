@@ -180,11 +180,11 @@ router.post('/recurring', auth.requireLogin, auth.requireLedgerWrite, (req, res)
 
   run(
     `INSERT INTO recurring_rules (ledger_id, name, payload, frequency, interval_n, day_of_month, next_run_at,
-      auto_post, is_active, created_at) VALUES (?,?,?,?,?,?,?,?,1,?)`,
+      auto_post, is_active, created_by_user_id, created_at) VALUES (?,?,?,?,?,?,?,?,1,?,?)`,
     ledgerId, name.slice(0, 40), JSON.stringify({ items, user_id: req.session.userId }),
     frequency, Math.max(1, Number(req.body.interval_n) || 1),
     req.body.day_of_month ? Number(req.body.day_of_month) : Number(next.slice(8, 10)),
-    next, req.body.auto_post ? 1 : 0, nowStr()
+    next, req.body.auto_post ? 1 : 0, req.session.userId, nowStr()
   );
   auth.audit(req, 'recurring.create', { entity: 'recurring', ledgerId, detail: name });
   res.flash('success', `周期账单「${name}」已创建，下次执行 ${next}`);
