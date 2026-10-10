@@ -163,9 +163,9 @@ def main():
     try:
         with open(os.path.join(src, "package.json"), encoding="utf-8") as f:
             import json
-            version = json.load(f).get("version", "1.0.0")
+            version = json.load(f).get("version", "0.1.1")
     except Exception:
-        version = "1.0.0"
+        version = "0.1.1"
     write_text(os.path.join(outer_dir, "manifest"), MANIFEST_TMPL.format(version=version))
     write_text(os.path.join(outer_dir, "config", "privilege"), PRIVILEGE)
     write_text(os.path.join(outer_dir, "config", "resource"), RESOURCE)
