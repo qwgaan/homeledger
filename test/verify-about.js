@@ -10,7 +10,7 @@
  * 运行：node test/verify-about.js
  */
 const BASE = 'http://127.0.0.1:8099';
-const { issuesUrl } = require('../src/lib/about');
+const { issuesUrl, CHANGELOG } = require('../src/lib/about');
 
 let pass = 0, fail = 0;
 function check(name, ok, detail = '') {
@@ -42,7 +42,7 @@ const csrfOf = (html) => (html.match(/name="_csrf"\s+value="([^"]+)"/) || [])[1]
   /* --- issuesUrl 单元（两种状态）--- */
   const saved = process.env.HOMELEDGER_GITHUB_REPO;
   delete process.env.HOMELEDGER_GITHUB_REPO;
-  check('未设环境变量时回退到内置 GITHUB_REPO', issuesUrl() === 'https://github.com/sucraft-hub/homeledger/issues', String(issuesUrl()));
+  check('未设环境变量时回退到内置 GITHUB_REPO', issuesUrl() === 'https://github.com/qwgaan/homeledger/issues', String(issuesUrl()));
   process.env.HOMELEDGER_GITHUB_REPO = 'https://github.com/su-xiansheng/homeledger/';
   check('配置仓库后返回规范 Issues 地址', issuesUrl() === 'https://github.com/su-xiansheng/homeledger/issues', String(issuesUrl()));
   process.env.HOMELEDGER_GITHUB_REPO = 'javascript:alert(1)';
@@ -64,17 +64,27 @@ const csrfOf = (html) => (html.match(/name="_csrf"\s+value="([^"]+)"/) || [])[1]
   check('侧栏出现「关于」入口', r.text.includes('href="/about"'));
   r = await req('GET', '/about', { cookie });
   check('关于页可访问', r.status === 200, `HTTP ${r.status}`);
-  check('显示当前版本号 v1.0.0', r.text.includes('v1.0.0'));
+  check('显示当前版本号 v0.1.1', r.text.includes('v0.1.1'));
   check('产品介绍渲染', r.text.includes('家账簿 HomeLedger') && r.text.includes('自托管'));
   check('功能亮点卡片渲染（6 个）', (r.text.match(/about-feature"/g) || []).length === 6, String((r.text.match(/about-feature"/g) || []).length));
-  check('版本日志渲染（含 1.0.0 首发）', r.text.includes('版本日志') && r.text.includes('v1.0.0') && r.text.includes('首个公开发布版本'));
+  check('版本日志渲染（含 0.1.1 与 1.0.0 首发）', r.text.includes('版本日志') && r.text.includes('v0.1.1') && r.text.includes('v1.0.0') && r.text.includes('首个公开发布版本'));
   check('统计卡渲染（记录笔数/陪伴天数）', r.text.includes('记录笔数') && r.text.includes('陪伴天数'));
   check('隐私声明渲染', r.text.includes('数据与隐私') && r.text.includes('不上传任何第三方服务器'));
   check('技术栈渲染', r.text.includes('技术栈') && r.text.includes('Node.js'));
   check('作者与 AI 辅助声明渲染', r.text.includes('蘇先生') && r.text.includes('AI 辅助'));
 
+  /* --- 版本日志自检：版本号必须互不重复，且只有一条标记「当前版本」 ---
+   * 教训：批量替换版本号时很容易把历史版本也一起改掉（本次就把 1.0.0 误改成 0.1.1），
+   * 页面上看不出问题、只有断言能兜住，所以这里显式校验。 */
+  const versions = CHANGELOG.map((c) => c.version);
+  check('版本日志版本号互不重复', new Set(versions).size === versions.length, versions.join(','));
+  check('恰好一条「当前版本」标记', CHANGELOG.filter((c) => c.tag === '当前版本').length === 1,
+    JSON.stringify(CHANGELOG.map((c) => [c.version, c.tag])));
+  check('当前版本等于 package.json 的 version', CHANGELOG[0].version === require('../package.json').version,
+    `${CHANGELOG[0].version} vs package.json ${require('../package.json').version}`);
+
   /* --- 反馈区：仓库已配置 → 渲染 GitHub Issues 外链 --- */
-  check('已配置仓库时渲染 GitHub Issues 外链', r.text.includes('href="https://github.com/sucraft-hub/homeledger/issues"'));
+  check('已配置仓库时渲染 GitHub Issues 外链', r.text.includes('href="https://github.com/qwgaan/homeledger/issues"'));
   check('外链新窗口打开且安全属性', /target="_blank"[^>]*rel="noopener"/.test(r.text));
   check('未配置降级提示不再出现', !r.text.includes('仓库地址暂未配置'));
 
