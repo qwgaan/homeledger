@@ -292,12 +292,29 @@ function parseBill(buffer, opts = {}) {
 
 /* --------------------------------- 执行导入 -------------------------------- */
 
+const ACCOUNT_TYPE_RULES = [
+  // 顺序即优先级：先判信用卡（「广发信用卡」必须落在 credit，
+  // 否则会被 /银行|卡/ 抢先判成 debit，钱就记到储蓄卡名下 —— 实测踩过的坑）
+  [/信用(卡)?|贷记卡|白金卡|信用卡/, 'credit', '💳'],
+  [/储蓄卡|借记卡|一卡通|活期|定期|存折/, 'debit', '🏦'],
+  [/支付宝|微信|京东|云闪付|美团|数字人民币/, 'virtual', '📱'],
+  [/银行|银行卡|卡$/, 'debit', '🏦'],
+];
+
+/** 按账户名推断类型与图标；推不出落 other。注意必须先判信用卡，见上方注释 */
+function inferAccountType(name) {
+  const s = String(name || '');
+  for (const [re, type, icon] of ACCOUNT_TYPE_RULES) {
+    if (re.test(s)) return { type, icon };
+  }
+  return { type: 'other', icon: '📦' };
+}
+
 function ensureAccount(ledgerId, name, createdList) {
   if (!name) return null;
   const id = resolveAccountId(ledgerId, name);
   if (id) return id;
-  const type = /信用/.test(name) ? 'credit' : /支付宝|微信|京东|云闪付/.test(name) ? 'virtual' : /银行|卡/.test(name) ? 'debit' : 'other';
-  const icon = type === 'credit' ? '💳' : type === 'virtual' ? '📱' : type === 'debit' ? '🏦' : '📦';
+  const { type, icon } = inferAccountType(name);
   const r = run(
     `INSERT INTO accounts (ledger_id, name, type, icon, currency, initial_cents, balance_cents, sort_order, note, created_at)
      VALUES (?,?,?,?,?,0,0,999,?,?)`,
@@ -305,6 +322,29 @@ function ensureAccount(ledgerId, name, createdList) {
   );
   createdList.push(name);
   return r.lastInsertRowid;
+}
+
+/** 按名字新建账户（导入页「+ 新建账户」用）。已存在同名账户则直接返回，不重复建 */
+function createAccountByName(ledgerId, name) {
+  const clean = String(name || '').trim();
+  if (!clean) throw new Error('账户名不能为空');
+  if (clean.length > 30) throw new Error('账户名请控制在 30 字以内');
+  // ⚠️ 这里必须**精确同名**才算已存在，不能用 resolveAccountId 的模糊匹配：
+  // 那个函数是「双向包含」，会认为「广发信用卡」与已有的「信用卡」是同一个账户，
+  // 于是用户明明点了「新建」，却静默复用旧的「信用卡」—— 钱就记到了错的账户上。
+  // 用户显式要求新建时，只有完全同名才复用。
+  const dup = get(
+    'SELECT id FROM accounts WHERE ledger_id = ? AND TRIM(name) = ? AND is_archived = 0',
+    ledgerId, clean
+  );
+  if (dup) return { id: Number(dup.id), created: false };
+  const { type, icon } = inferAccountType(clean);
+  const r = run(
+    `INSERT INTO accounts (ledger_id, name, type, icon, currency, initial_cents, balance_cents, sort_order, note, created_at)
+     VALUES (?,?,?,?,?,0,0,999,?,?)`,
+    ledgerId, clean.slice(0, 30), type, icon, 'CNY', '导入账单时创建', nowStr()
+  );
+  return { id: r.lastInsertRowid, created: true, type };
 }
 
 /** 「不计收支」记录（提现/充值）找不到对方账户时使用的兜底账户，保证转账双边平衡 */
@@ -347,10 +387,18 @@ function bankSummaryOf(aiJson) {
 function importRecords({
   ledgerId, userId, records, neutralRecords = [], includeNeutral = false,
   source, fileName, autoCreateAccount = true, defaultAccountId = null,
+  targetAccountId = null,
 }) {
   const createdAccounts = [];
   let imported = 0, skipped = 0, failed = 0;
   const list = includeNeutral ? records.concat(neutralRecords) : records.slice();
+  // 用户手工指定的目标账户：优先级最高，覆盖按摘要猜出来的账户。
+  // 银行流水（广发/招行）摘要里没有账户信息，不指定就只能靠新建兜底 —— 那正是
+  // 「导入后钱全落到储蓄卡」的根因，所以这里必须让用户的显式选择说了算。
+  const forcedAccountId = targetAccountId ? Number(targetAccountId) : null;
+  if (forcedAccountId && !get('SELECT id FROM accounts WHERE id = ? AND ledger_id = ?', forcedAccountId, ledgerId)) {
+    throw new Error('指定的导入账户不存在，请刷新页面后重选');
+  }
   // dupCount: 指纹 → 库中已存在的条数。
   // 预载已有记录指纹，避免重复导入；用计数而非布尔，才能支持「同一天同额同商户的多笔」。
   const dupCount = new Map();
@@ -378,16 +426,26 @@ function importRecords({
 
         let categoryId = null;
         let toAccountId = null;
-        const accountId = autoCreateAccount
-          ? ensureAccount(ledgerId, rec.account_hint, createdAccounts)
-          : resolveAccountId(ledgerId, rec.account_hint) || defaultAccountId;
+        const accountId = forcedAccountId
+          ? forcedAccountId
+          : autoCreateAccount
+            ? ensureAccount(ledgerId, rec.account_hint, createdAccounts)
+            : resolveAccountId(ledgerId, rec.account_hint) || defaultAccountId;
 
         if (rec.neutral) {
           // 提现 / 充值：账户之间搬钱，不计入收支。对方账户优先从说明文字推断
           const cpName = guessAccountName(rec.text) || NEUTRAL_FALLBACK_ACCOUNT;
-          toAccountId = autoCreateAccount
+          // 指定了目标账户时，对方账户不能也解析成同一个（自己转给自己会变成空操作），
+          // 优先按摘要猜，猜不出再退回兜底账户。
+          let cpId = autoCreateAccount
             ? ensureAccount(ledgerId, cpName, createdAccounts) || ensureAccount(ledgerId, NEUTRAL_FALLBACK_ACCOUNT, createdAccounts)
             : resolveAccountId(ledgerId, cpName) || null;
+          if (forcedAccountId && Number(cpId) === forcedAccountId) {
+            cpId = autoCreateAccount
+              ? ensureAccount(ledgerId, NEUTRAL_FALLBACK_ACCOUNT, createdAccounts)
+              : resolveAccountId(ledgerId, NEUTRAL_FALLBACK_ACCOUNT) || null;
+          }
+          toAccountId = cpId;
         } else {
           const kind = rec.type === 'income' ? 'income' : 'expense';
           const kw = classifyByKeywords(rec.text);
@@ -468,5 +526,5 @@ function parseBillFile(buf, fileName = '', opts = {}) {
 module.exports = {
   parseBill, parseBillFile, importRecords, toCsv, csvEscape, EXPORT_HEADER, exportRows,
   decodeBuffer, normalizeDate, bankPrefix, bankDirection, bankMerchant,
-  BANK_PREFIX_TYPE,
+  BANK_PREFIX_TYPE, ensureAccount, createAccountByName, inferAccountType,
 };
